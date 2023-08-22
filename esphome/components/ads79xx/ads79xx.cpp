@@ -19,6 +19,7 @@ void ADS79XX::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ads79xx pins");
   this->spi_setup();
 
+  ESP_LOGCONFIG(TAG, "Setting up ads79xx registers");
   this->enable();
   this->write_byte16( (MODECONTROL_MANUAL << 12) |
                       (1 << 11) |          // Enable setting of configuration bits
