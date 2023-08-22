@@ -4,55 +4,43 @@
 namespace esphome {
 namespace ads79xx {
 
-static const char *const TAG = "ads79xx";
+static constexpr char TAG[] = "ads79xx";
+
+static constexpr uint8_t MODECONTROL_MANUAL        = 0b0001;
+static constexpr uint8_t MODECONTROL_AUTO1         = 0b0010;
+static constexpr uint8_t MODECONTROL_AUTO2         = 0b0011;
+static constexpr uint8_t MODECONTROL_GPIO          = 0b0100;
+static constexpr uint8_t MODECONTROL_AUTO1PROGRAM  = 0b1000;
+static constexpr uint8_t MODECONTROL_AUTO2PROGRAM  = 0b1001;
 
 // Datasheet: https://www.ti.com/lit/ds/symlink/ads7953.pdf
-
-float ADS79XX::get_setup_priority() const { return setup_priority::HARDWARE; }
 
 void ADS79XX::setup() {
   ESP_LOGCONFIG(TAG, "Setting up ads79xx pins");
   this->spi_setup();
 
   this->enable();
-  this->write_byte16(0b0010110001000000); // Configure automatic mode
+  this->write_byte16( (MODECONTROL_MANUAL << 12) |
+                      (1 << 11) |          // Enable setting of configuration bits
+                      (1 << 6) );          // Enable 2xVref
   this->disable();
-  delayMicroseconds(3);
+
   this->enable();
-  this->write_byte16(0b0100000000000001); // Configure GPIO0 as output
-  this->disable();
-  delayMicroseconds(3);
-  this->enable();
-  this->write_byte16(0b1000000000000000); // Configure auto-1 register
-  this->disable();
-  delayMicroseconds(3);
-  this->enable();
-  this->write_byte16(0b1111111111111111); // All channels
+  this->write_byte16( (MODECONTROL_GPIO << 12) | 1);                  // Configure GPIO0 as output (Valid for both TSOP and QFN devices)
   this->disable();
 }
 
 void ADS79XX::dump_config() {
-  ESP_LOGCONFIG(TAG, "ads79xx:");
-  LOG_PIN("  CS Pin: ", this->cs_);
-  ESP_LOGCONFIG(TAG, "  Reference Voltage: %.2fV", this->reference_voltage_);
+  ESP_LOGCONFIG(TAG,   "ads79xx:");
+  LOG_PIN(             "  CS Pin: ", this->cs_);
+  ESP_LOGCONFIG(TAG,   "  Reference Voltage: %.2fV", this->reference_voltage_);
 }
 
-uint16_t ADS79XX::manual_read(const uint8_t channel)
+uint16_t ADS79XX::manual_read_singleshot(const uint8_t channel)
 {
-  ESP_LOGD(TAG, "Doing a manual read on channel %d", channel);
-  this->enable();
-  uint16_t config = 0b0001100001000000 | (channel << 7); // Manual read of configured channel, turn on GPIO0 for visualization
-  this->write_byte16(config); // Send initial read command
-  this->disable();
-  delayMicroseconds(3); // Datasheet says only 1125ns are needed, but leave some wiggle room
+  uint16_t config = (MODECONTROL_MANUAL << 12) | (channel << 7); // Manual read of configured channel
 
   this->enable();
-  this->write_byte16(0); // Waste a cycle for allow for acquisition
-  this->disable();
-  delayMicroseconds(3); // Datasheet says only 1125ns are needed, but leave some wiggle room
-
-  this->enable();
-  config = 0b0001100001000001 | (channel << 7); //Turn off GPIO as acquisition is completed
   uint8_t adc_primary_byte = this->transfer_byte(config >> 8);
   uint8_t adc_secondary_byte = this->transfer_byte(config & 0xFF);
   this->disable();
@@ -60,45 +48,26 @@ uint16_t ADS79XX::manual_read(const uint8_t channel)
   return (adc_primary_byte << 8 | adc_secondary_byte);
 }
 
-void ADS79XX::loop()
-{
-  this->enable();
-  uint16_t config = 0b0010000000000000; // Auto Read
-  uint8_t adc_primary_byte = this->transfer_byte(config >> 8);
-  uint8_t adc_secondary_byte = this->transfer_byte(config & 0xFF);
-  this->disable();
-  //delayMicroseconds(3); // Datasheet says only 1125ns are needed, but leave some wiggle room
-
-  uint16_t adc_counts = (adc_primary_byte << 8 | adc_secondary_byte);
-
-  uint8_t channel_id = (adc_counts >> 12);
-  //uint16_t digital_value = adc_counts & 0x0FFF; // Strip channel ID
-
-  this->adc_counts_[channel_id] = adc_counts;
-  this->adc_read_ &= ~(1 << channel_id);
-}
-
 float ADS79XX::read_data(uint8_t channel)
 {
-  uint16_t adc_read = 0;
-  if (this->adc_read_ & (1 << channel))
-    adc_read = this->manual_read(channel);
-  else
+  uint16_t adc_counts = 0;
+  uint8_t channel_id = 0;
+  for (int i=0; i<3; i++) // Attempt three times as per the datasheet the last attempt should have the requested channel
   {
-    adc_read = this->adc_counts_[channel];
-    this->adc_read_ |= (1 << channel);
+    adc_counts = manual_read_singleshot(channel);
+    channel_id = (adc_counts >> 12);
+    ESP_LOGV(TAG, "A/D Manual Read %d.  Req: %d, Recv Chan: %d, Recv: 0x%04X", i, channel, channel_id, adc_counts);
+    if (channel_id == channel) break; // In the instance of repeated reads, allow an earlier request's result to be used
   }
-
-  uint8_t channel_id = (adc_read >> 12);
-  uint16_t digital_value = adc_read & 0x0FFF; // Strip channel ID
-
-  ESP_LOGV(TAG, "Requested A/D Read of channel %d.  Received channel %d , Counts 0x%04X", channel, channel_id, digital_value);
-
+  
   if (channel_id != channel)
   {
-    ESP_LOGE(TAG, "Failed to read channel %d, received %d", channel, channel_id);
+    this->mark_failed();
+    ESP_LOGE(TAG, "Failed to read channel %d, received channel %d", channel, channel_id);
     return NAN;
   }
+
+  uint16_t digital_value = adc_counts & 0x0FFF; // Strip channel ID
 
   return (digital_value / 4096.000) * this->reference_voltage_;
 }
