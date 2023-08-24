@@ -15,15 +15,24 @@ class ADS79XXSensor : public PollingComponent,
                       public sensor::Sensor,
                       public voltage_sampler::VoltageSampler {
  public:
-  ADS79XXSensor(uint8_t channel);
+  ADS79XXSensor() = default;
 
   void update() override;
   void dump_config() override;
   float get_setup_priority() const override;
   float sample() override;
 
+  uint8_t get_channel() const { return this->channel_; }
+  void set_channel(const uint8_t channel) { this->channel_ = channel; }
+  
+  float get_vref_voltage() const { return (this->double_vref_ ? 5.000 : 2.500); }
+
+  void set_double_vref(const bool double_vref) { this->double_vref_ = double_vref; }
+  bool get_double_vref() const { return this->double_vref_; }
+
  protected:
   uint8_t channel_;
+  bool double_vref_;
 };
 }  // namespace ads79xx
 }  // namespace esphome

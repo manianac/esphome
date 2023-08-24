@@ -21,6 +21,7 @@ ADS79XXSensor = ads79xx_ns.class_(
     voltage_sampler.VoltageSampler,
 )
 CONF_ADS79XX_ID = "ads79xx_id"
+CONF_DOUBLE_VREF = "double_vref"
 
 CONFIG_SCHEMA = (
     sensor.sensor_schema(
@@ -34,6 +35,7 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(CONF_ADS79XX_ID): cv.use_id(ADS79XX),
             cv.Required(CONF_CHANNEL): cv.int_range(min=0, max=15),
+            cv.Optional(CONF_DOUBLE_VREF, default="true"): cv.boolean,
         }
     )
     .extend(cv.polling_component_schema("60s"))
@@ -41,10 +43,9 @@ CONFIG_SCHEMA = (
 
 
 async def to_code(config):
-    var = cg.new_Pvariable(
-        config[CONF_ID],
-        config[CONF_CHANNEL],
-    )
+    var = cg.new_Pvariable(config[CONF_ID])
+    cg.add(var.set_channel(config[CONF_CHANNEL]))
+    cg.add(var.set_double_vref(config[CONF_DOUBLE_VREF]))
     await cg.register_parented(var, config[CONF_ADS79XX_ID])
     await cg.register_component(var, config)
     await sensor.register_sensor(var, config)
