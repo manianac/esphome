@@ -60,7 +60,7 @@ void MCP7940Component::write_time() {
     ESP_LOGE(TAG, "Invalid system time, not syncing to RTC.");
     return;
   }
-  
+
   this->mcp7940_.reg.year = (now.year - 2000) % 10;
   this->mcp7940_.reg.year_10 = (now.year - 2000) / 10 % 10;
   this->mcp7940_.reg.month = now.month % 10;
@@ -77,6 +77,8 @@ void MCP7940Component::write_time() {
   this->mcp7940_.reg.start_osc = true;
   this->mcp7940_.reg.ext_osc_en = this->external_osc_;
   this->mcp7940_.reg.hour_12_24 = 0;
+  this->mcp7940_.reg.course_trim_enable = this->course_osc_trim_;
+  this->mcp7940_.reg.trim_value = this->osc_trim_ / 2; // 
 
   this->write_rtc_();
 }

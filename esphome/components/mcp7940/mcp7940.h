@@ -16,7 +16,8 @@ class MCP7940Component : public time::RealTimeClock, public i2c::I2CDevice {
   void read_time();
   void write_time();
   void set_external_osc(const bool val) { this->external_osc_ = val; }
-  bool get_external_osc() const { return this->external_osc_; }
+  void set_oscillator_trim(const int8_t val) { this->osc_trim_ = val; }
+  void set_course_trim(const bool val) { this->course_osc_trim_ = val; }
 
  protected:
   bool read_rtc_();
@@ -68,6 +69,8 @@ class MCP7940Component : public time::RealTimeClock, public i2c::I2CDevice {
     mutable uint8_t raw[sizeof(reg)];
   } mcp7940_;
   bool external_osc_;
+  bool course_osc_trim_;
+  int16_t osc_trim_;
 };
 
 template<typename... Ts> class WriteAction : public Action<Ts...>, public Parented<MCP7940Component> {
