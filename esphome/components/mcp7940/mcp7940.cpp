@@ -78,7 +78,9 @@ void MCP7940Component::write_time() {
   this->mcp7940_.reg.ext_osc_en = this->external_osc_;
   this->mcp7940_.reg.hour_12_24 = 0;
   this->mcp7940_.reg.course_trim_enable = this->course_osc_trim_;
-  this->mcp7940_.reg.trim_value = this->osc_trim_ / 2; // 
+  this->mcp7940_.reg.trim_value = this->osc_trim_ / 2;
+  this->mcp7940_.reg.squarewave_output_en = this->sqwv_output_;
+  this->mcp7940_.reg.square_wave_freq = this->sqwv_frequency_;
 
   this->write_rtc_();
 }

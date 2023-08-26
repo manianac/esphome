@@ -7,6 +7,13 @@
 namespace esphome {
 namespace mcp7940 {
 
+enum MCP7940SqWvFrequency {
+  MCP7940_POSTSCALER_32768 = 0,
+  MCP7940_POSTSCALER_8 = 1,
+  MCP7940_POSTSCALER_4 = 2,
+  MCP7940_POSTSCALER_1 = 3,
+};
+
 class MCP7940Component : public time::RealTimeClock, public i2c::I2CDevice {
  public:
   void setup() override;
@@ -18,6 +25,8 @@ class MCP7940Component : public time::RealTimeClock, public i2c::I2CDevice {
   void set_external_osc(const bool val) { this->external_osc_ = val; }
   void set_oscillator_trim(const int8_t val) { this->osc_trim_ = val; }
   void set_course_trim(const bool val) { this->course_osc_trim_ = val; }
+  void set_sqwv_enable(const bool val) { this->sqwv_output_ = val; }
+  void set_sqwv_frequency(const MCP7940SqWvFrequency val) { this->sqwv_frequency_ = val; }
 
  protected:
   bool read_rtc_();
@@ -71,6 +80,8 @@ class MCP7940Component : public time::RealTimeClock, public i2c::I2CDevice {
   bool external_osc_;
   bool course_osc_trim_;
   int16_t osc_trim_;
+  bool sqwv_output_;
+  uint8_t sqwv_frequency_;
 };
 
 template<typename... Ts> class WriteAction : public Action<Ts...>, public Parented<MCP7940Component> {
