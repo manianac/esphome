@@ -34,12 +34,11 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.GenerateID(): cv.declare_id(RoombaTextSensor),
             cv.GenerateID(CONF_ROOMBA_ID): cv.use_id(RoombaComponent),
-            cv.Optional(CONF_REMOTE_OPCODE): text_sensor.text_sensor_schema(
-            ),
+            cv.Optional(CONF_REMOTE_OPCODE): text_sensor.text_sensor_schema(),
         }
     )
-
 )
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])

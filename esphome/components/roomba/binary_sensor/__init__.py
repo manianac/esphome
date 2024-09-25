@@ -40,55 +40,63 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(RoombaBinarySensor),
             cv.GenerateID(CONF_ROOMBA_ID): cv.use_id(RoombaComponent),
-            cv.Optional(CONF_WALL_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_LEFTBUMP_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_RIGHTBUMP_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
+            cv.Optional(CONF_WALL_SENSOR): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_LEFTBUMP_SENSOR): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_RIGHTBUMP_SENSOR): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_LEFT_WHEELDROP_SENSOR): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_RIGHT_WHEELDROP_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_RIGHT_WHEELDROP_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_CASTER_WHEELDROP_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_CASTER_WHEELDROP_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_CLIFF_LEFT_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_CLIFF_FRONTLEFT_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_CLIFF_FRONTRIGHT_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_CLIFF_RIGHT_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_VIRTUALWALL_SENSOR): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_MOTOR_SIDEBRUSH_OVERCURRENT_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(CONF_CLIFF_LEFT_SENSOR): binary_sensor.binary_sensor_schema(),
+            cv.Optional(
+                CONF_CLIFF_FRONTLEFT_SENSOR
+            ): binary_sensor.binary_sensor_schema(),
+            cv.Optional(
+                CONF_CLIFF_FRONTRIGHT_SENSOR
+            ): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_CLIFF_RIGHT_SENSOR): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_VIRTUALWALL_SENSOR): binary_sensor.binary_sensor_schema(),
+            cv.Optional(
+                CONF_MOTOR_SIDEBRUSH_OVERCURRENT_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_MOTOR_VACUUM_OVERCURRENT_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_MOTOR_VACUUM_OVERCURRENT_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_MOTOR_MAINBRUSH_OVERCURRENT_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_MOTOR_MAINBRUSH_OVERCURRENT_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_MOTOR_RIGHTWHEEL_OVERCURRENT_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_MOTOR_RIGHTWHEEL_OVERCURRENT_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_MOTOR_LEFTWHEEL_OVERCURRENT_SENSOR): binary_sensor.binary_sensor_schema(
+            cv.Optional(
+                CONF_MOTOR_LEFTWHEEL_OVERCURRENT_SENSOR
+            ): binary_sensor.binary_sensor_schema(
                 device_class=DEVICE_CLASS_PROBLEM,
             ),
-            cv.Optional(CONF_POWER_BUTTON): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_SPOT_BUTTON): binary_sensor.binary_sensor_schema(
-            ),
-            cv.Optional(CONF_CLEAN_BUTTON): binary_sensor.binary_sensor_schema(
-            ),
+            cv.Optional(CONF_POWER_BUTTON): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_SPOT_BUTTON): binary_sensor.binary_sensor_schema(),
+            cv.Optional(CONF_CLEAN_BUTTON): binary_sensor.binary_sensor_schema(),
         }
     )
 )
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
@@ -106,19 +114,27 @@ async def to_code(config):
         sens = await binary_sensor.new_binary_sensor(config[CONF_LEFT_WHEELDROP_SENSOR])
         cg.add(var.set_leftwheeldrop_sensor(sens))
     if CONF_RIGHT_WHEELDROP_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_RIGHT_WHEELDROP_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_RIGHT_WHEELDROP_SENSOR]
+        )
         cg.add(var.set_rightwheeldrop_sensor(sens))
     if CONF_CASTER_WHEELDROP_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_CASTER_WHEELDROP_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_CASTER_WHEELDROP_SENSOR]
+        )
         cg.add(var.set_casterwheeldrop_sensor(sens))
     if CONF_CLIFF_LEFT_SENSOR in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_CLIFF_LEFT_SENSOR])
         cg.add(var.set_cliffleft_sensor(sens))
     if CONF_CLIFF_FRONTLEFT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_CLIFF_FRONTLEFT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_CLIFF_FRONTLEFT_SENSOR]
+        )
         cg.add(var.set_cliffleftfront_sensor(sens))
     if CONF_CLIFF_FRONTRIGHT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_CLIFF_FRONTRIGHT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_CLIFF_FRONTRIGHT_SENSOR]
+        )
         cg.add(var.set_cliffrightfront_sensor(sens))
     if CONF_CLIFF_RIGHT_SENSOR in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_CLIFF_RIGHT_SENSOR])
@@ -127,19 +143,29 @@ async def to_code(config):
         sens = await binary_sensor.new_binary_sensor(config[CONF_VIRTUALWALL_SENSOR])
         cg.add(var.set_virtualwall_sensor(sens))
     if CONF_MOTOR_SIDEBRUSH_OVERCURRENT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_MOTOR_SIDEBRUSH_OVERCURRENT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_MOTOR_SIDEBRUSH_OVERCURRENT_SENSOR]
+        )
         cg.add(var.set_sidebrush_overcurrent_sensor(sens))
     if CONF_MOTOR_VACUUM_OVERCURRENT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_MOTOR_VACUUM_OVERCURRENT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_MOTOR_VACUUM_OVERCURRENT_SENSOR]
+        )
         cg.add(var.set_vacuum_overcurrent_sensor(sens))
     if CONF_MOTOR_MAINBRUSH_OVERCURRENT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_MOTOR_MAINBRUSH_OVERCURRENT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_MOTOR_MAINBRUSH_OVERCURRENT_SENSOR]
+        )
         cg.add(var.set_mainbrush_overcurrent_sensor(sens))
     if CONF_MOTOR_RIGHTWHEEL_OVERCURRENT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_MOTOR_RIGHTWHEEL_OVERCURRENT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_MOTOR_RIGHTWHEEL_OVERCURRENT_SENSOR]
+        )
         cg.add(var.set_rightwheel_overcurrent_sensor(sens))
     if CONF_MOTOR_LEFTWHEEL_OVERCURRENT_SENSOR in config:
-        sens = await binary_sensor.new_binary_sensor(config[CONF_MOTOR_LEFTWHEEL_OVERCURRENT_SENSOR])
+        sens = await binary_sensor.new_binary_sensor(
+            config[CONF_MOTOR_LEFTWHEEL_OVERCURRENT_SENSOR]
+        )
         cg.add(var.set_leftwheel_overcurrent_sensor(sens))
     if CONF_POWER_BUTTON in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_POWER_BUTTON])

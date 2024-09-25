@@ -19,9 +19,7 @@ from .. import roomba_ns, RoombaComponent, CONF_ROOMBA_ID
 
 DEPENDENCIES = ["roomba"]
 
-RoombaSensor = roomba_ns.class_(
-    "RoombaSensor", sensor.Sensor, cg.Component
-)
+RoombaSensor = roomba_ns.class_("RoombaSensor", sensor.Sensor, cg.Component)
 
 CONF_BATTERY_CURRENT = "battery_current"
 CONF_BATTERY_CHARGE = "battery_charge"
@@ -85,6 +83,7 @@ CONFIG_SCHEMA = cv.All(
         }
     )
 )
+
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
