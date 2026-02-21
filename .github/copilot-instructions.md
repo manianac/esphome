@@ -6,6 +6,7 @@
 - CLI entrypoint is [esphome/__main__.py](../esphome/__main__.py); dashboard is in [esphome/dashboard](../esphome/dashboard).
 
 ## Workflows & commands
+- **Always activate the virtual environment first**: `source /home/oscillix/repos/esphome/venv/bin/activate`
 - Prefer running tools via `script/run-in-env.py` to use the project venv (see [script](../script)).
 - Component build tests: `script/test_build_components` (uses common bus packages in [tests/test_build_components/common](../tests/test_build_components/common)). Avoid `!extend`/`!remove` in component test YAML to keep configs groupable.
 - Integration tests: [tests/integration](../tests/integration) use `fixtures/{test_name}.yaml` (auto-mapped from test name). Use `InitialStateHelper` in `state_utils.py` for state subscriptions.
