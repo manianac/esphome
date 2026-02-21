@@ -1,0 +1,23 @@
+# Example ESPHome YAML configuration for whirlpool_spi component
+# Place this in your config directory
+
+esphome:
+  name: whirlpool_example
+  friendly_name: "Whirlpool SPI Example"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    version: recommended
+
+logger:
+  level: DEBUG
+
+# Whirlpool SPI component configuration
+whirlpool_spi:
+  mosi_pin: GPIO23   # Required
+  clk_pin: GPIO18    # Required
+  miso_pin: GPIO19   # Optional
+  cs_pin: GPIO5      # Optional (omit to disable CS, making slave always active)
+  buffer_size: 64    # Optional, default 64 bytes
