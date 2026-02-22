@@ -6,6 +6,10 @@
 #include "driver/spi_slave.h"
 
 namespace esphome {
+namespace text_sensor {
+class TextSensor;
+}  // namespace text_sensor
+
 namespace whirlpool_spi {
 
 class WhirlpoolSPI : public Component {
@@ -21,6 +25,7 @@ class WhirlpoolSPI : public Component {
   void set_miso_pin(GPIOPin *pin) { miso_pin_ = pin; }
   void set_cs_pin(GPIOPin *pin) { cs_pin_ = pin; }
   void set_buffer_size(size_t size) { buffer_size_ = size; }
+  void set_rx_buffer_text_sensor(text_sensor::TextSensor *sensor) { rx_buffer_sensor_ = sensor; }
 
  private:
   GPIOPin *mosi_pin_{nullptr};
@@ -28,6 +33,7 @@ class WhirlpoolSPI : public Component {
   GPIOPin *miso_pin_{nullptr};
   GPIOPin *cs_pin_{nullptr};
   size_t buffer_size_{64};
+  text_sensor::TextSensor *rx_buffer_sensor_{nullptr};
 
   // SPI slave transaction buffer
   uint8_t *rx_buffer_{nullptr};

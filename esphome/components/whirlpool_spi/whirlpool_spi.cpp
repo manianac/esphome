@@ -2,6 +2,7 @@
 
 #include "esphome/core/log.h"
 #include "esphome/core/gpio.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "driver/gpio.h"
 
 namespace esphome {
@@ -161,19 +162,30 @@ void WhirlpoolSPI::loop() {
     size_t bytes_received = rtrans->trans_len / 8;  // Convert bits to bytes
 
     if (bytes_received > 0) {
-      ESP_LOGD(TAG, "Received %u bytes:", bytes_received);
+      ESP_LOGV(TAG, "Received %u bytes:", bytes_received);
 
       // Log hex dump of received data
+      std::string hex_dump;
       for (size_t i = 0; i < bytes_received; i++) {
         if (i % 16 == 0) {
           if (i > 0) {
-            ESP_LOGD(TAG, "");
+            ESP_LOGV(TAG, "");
           }
-          ESP_LOGD(TAG, "  %04zx: ", i);
+          ESP_LOGV(TAG, "  %04zx: ", i);
         }
-        ESP_LOGD(TAG, "%02x ", rx_buffer_[i]);
+        ESP_LOGV(TAG, "%02x ", rx_buffer_[i]);
+
+        // Build hex string for text sensor
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02x ", rx_buffer_[i]);
+        hex_dump += buf;
       }
-      ESP_LOGD(TAG, "");
+      ESP_LOGV(TAG, "");
+
+      // Publish to text sensor if configured
+      if (rx_buffer_sensor_ != nullptr) {
+        rx_buffer_sensor_->publish_state(hex_dump);
+      }
     }
 
     // Clear the receive buffer for next transaction
