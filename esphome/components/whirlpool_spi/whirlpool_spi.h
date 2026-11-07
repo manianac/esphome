@@ -192,7 +192,6 @@ class WhirlpoolSPI : public PollingComponent {
   uint32_t mosi_shift_{0};                   // MOSI bits of the current transfer
   uint8_t miso_bit_{0};                      // Bit position of each pin in GPIO_IN_REG
   uint8_t mosi_bit_{0};
-  std::atomic<uint32_t> clk_glitches_{0};  // CLK interrupts the pulse counter didn't confirm, since boot
 #endif
   uint8_t cs_bit_{0};  // CS pin's bit position in GPIO_IN_REG
 

@@ -133,10 +133,8 @@ void IRAM_ATTR WhirlpoolSPI::clk_isr_(WhirlpoolSPI *c) {
   const uint32_t in = REG_READ(GPIO_IN_REG);
   int count;
   pcnt_unit_get_count(c->clk_counter_, &count);
-  if (count == c->last_clk_count_) {
-    c->clk_glitches_.store(c->clk_glitches_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  if (count == c->last_clk_count_)
     return;
-  }
   c->last_clk_count_ = count;
   // An edge with CS high (this ISR ran after the transfer ended) is not part of a transfer.
   if ((in >> c->cs_bit_) & 1)
@@ -421,8 +419,6 @@ void WhirlpoolSPI::update() {
            groups_dropped_ps, groups_failed_ps);
 #ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
   ESP_LOGD(TAG, "Channel desyncs since boot: %" PRIu32, this->channel_desyncs_.load(std::memory_order_relaxed));
-#else
-  ESP_LOGD(TAG, "CLK glitches rejected since boot: %" PRIu32, this->clk_glitches_.load(std::memory_order_relaxed));
 #endif
 
   // Publish to diagnostic sensors (all rates are per-second; buffer_queue is a snapshot)
