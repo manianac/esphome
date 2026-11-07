@@ -4,6 +4,7 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 
 #include "soc/gpio_reg.h"
@@ -93,20 +94,30 @@ void IRAM_ATTR WhirlpoolSPI::channel_transfer_done_(spi_slave_transaction_t *tra
 // CLK interrupt gets to read it.
 static constexpr uint32_t CLK_GLITCH_FILTER_NS = 500;
 
-// ISR for CS transitions (both edges).
+// Always inlined so it lands in the calling ISR's IRAM section.
+ESPHOME_ALWAYS_INLINE inline void WhirlpoolSPI::begin_transfer_() {
+  this->bit_count_ = 0;
+  this->miso_shift_ = 0;
+  this->mosi_shift_ = 0;
+  this->in_transfer_ = true;
+}
+
+// ISR for CS transitions (both edges). Both ISRs run from the one GPIO interrupt, so they never preempt each other.
 void IRAM_ATTR WhirlpoolSPI::cs_isr_(WhirlpoolSPI *c) {
   const uint32_t in = REG_READ(GPIO_IN_REG);
 
   if (((in >> c->cs_bit_) & 1) == 0) {
-    // CS low: start of transfer. Clearing here also discards any clock edges seen while CS was high.
-    c->bit_count_ = 0;
-    c->miso_shift_ = 0;
-    c->mosi_shift_ = 0;
-    pcnt_unit_get_count(c->clk_counter_, &c->last_clk_count_);
+    // CS low: start of transfer, unless the first CLK interrupt already started it (see clk_isr_). A CS pulse high that
+    // was over before this ran also lands here, and leaves the running transfer alone.
+    if (!c->in_transfer_)
+      c->begin_transfer_();
     return;
   }
 
   // CS high: end of transfer.
+  if (!c->in_transfer_)
+    return;
+  c->in_transfer_ = false;
   // A CS pulse with no clocks carries no data, so don't let it disturb the frame-group state machine.
   if (c->bit_count_ != 0) {
     // Each falling edge sampled the MISO bit before its own, so shift those into place and take the last bit from
@@ -127,6 +138,14 @@ void IRAM_ATTR WhirlpoolSPI::clk_isr_(WhirlpoolSPI *c) {
     return;
   }
   c->last_clk_count_ = count;
+  // An edge with CS high (this ISR ran after the transfer ended) is not part of a transfer.
+  if ((in >> c->cs_bit_) & 1)
+    return;
+  // If the first edge comes before the CS-low interrupt has been handled, both are pending at once and the GPIO
+  // interrupt service runs the lower GPIO number first, which can be CLK. Start the transfer here rather than count
+  // this bit and then have the CS-low handler clear it.
+  if (!c->in_transfer_)
+    c->begin_transfer_();
   c->miso_shift_ = (c->miso_shift_ << 1) | ((in >> c->miso_bit_) & 1);
   c->mosi_shift_ = (c->mosi_shift_ << 1) | ((in >> c->mosi_bit_) & 1);
   c->bit_count_++;
@@ -301,14 +320,12 @@ void WhirlpoolSPI::process_frame_(const Transfer &frame) {
     ESP_LOGV(TAG, "REJECTED Bits: %2" PRIu32 " / %2" PRIu32 "  |  MISO: %08" PRIX32 "  |  MOSI: %08" PRIX32,
              frame.bit_count, EXPECTED_BITS, frame.data_miso, frame.data_mosi);
 
-    // Bad frame: if we were mid-group, drop the entire group
+    // Bad frame: if we were mid-group, drop the entire group. The debounce run is left alone (see match_count_).
     if (this->frame_group_pos_ > 0) {
       ESP_LOGV(TAG, "Frame group dropped at position %" PRIu32 " (bad bit count %" PRIu32 ")", this->frame_group_pos_,
                frame.bit_count);
       this->groups_dropped_++;
       this->frame_group_pos_ = 0;
-      // Invalidate debounce history: the stream was disrupted
-      this->match_count_ = 0;
     }
     return;
   }
@@ -324,8 +341,6 @@ void WhirlpoolSPI::process_frame_(const Transfer &frame) {
       // We were mid-group but got a new marker - drop the incomplete group
       ESP_LOGV(TAG, "Frame group dropped at position %" PRIu32 " (new marker arrived early)", this->frame_group_pos_);
       this->groups_dropped_++;
-      // Invalidate debounce history: the stream was disrupted
-      this->match_count_ = 0;
     }
     this->frame_group_pos_ = 0;
   } else if (this->frame_group_pos_ == 0) {
@@ -533,6 +548,71 @@ void WhirlpoolSPI::publish_frame_group_() {
     this->wash_temp_binary_sensor_->publish_state((f4miso_byte & BUTTON_MASK_WASH_TEMP) != 0);
   if (this->dispensers_binary_sensor_ != nullptr)
     this->dispensers_binary_sensor_->publish_state((f4miso_byte & BUTTON_MASK_DISPENSERS) != 0);
+
+  if (this->done_binary_sensor_ != nullptr)
+    this->done_binary_sensor_->publish_state((this->frame_group_.mosi[DONE_LED_FRAME] & DONE_LED_MASK) != 0);
+
+  this->publish_display_();
+}
+
+// Segments of the digits 0-9 as this panel draws them, each checked against the display. Its 9 has no segment d.
+static constexpr uint8_t DIGIT_SEGMENTS[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x67};
+
+// The digit a segment pattern draws, or -1 if it isn't exactly one of DIGIT_SEGMENTS.
+static int segments_to_digit(uint8_t segments) {
+  for (int digit = 0; digit < 10; digit++) {
+    if (DIGIT_SEGMENTS[digit] == segments)
+      return digit;
+  }
+  return -1;
+}
+
+void WhirlpoolSPI::publish_display_() {
+  const uint8_t tens = (this->frame_group_.mosi[DISPLAY_TENS_FRAME] >> 24) & DISPLAY_SEGMENTS_MASK;
+  const uint8_t units = (this->frame_group_.mosi[DISPLAY_UNITS_FRAME] >> 24) & DISPLAY_SEGMENTS_MASK;
+
+  // Most group changes are other LEDs, such as the blinking Start light, so publish only when the display changes.
+  const uint16_t shown = (tens << 8) | units;
+  if (this->has_published_display_ && shown == this->published_display_)
+    return;
+  this->published_display_ = shown;
+  this->has_published_display_ = true;
+
+  const int tens_digit = segments_to_digit(tens);
+  const int units_digit = segments_to_digit(units);
+
+  if (this->display_text_sensor_ != nullptr) {
+    // Each position is its digit, a space when dark, or its raw segments as [XX] when they don't draw a digit.
+    char text[9];  // Two positions of up to 4 characters, and the terminator
+    size_t len = 0;
+    auto append = [&text, &len](uint8_t segments, int digit) {
+      if (digit >= 0) {
+        text[len++] = static_cast<char>('0' + digit);
+      } else if (segments == 0) {
+        text[len++] = ' ';
+      } else {
+        len += snprintf(text + len, sizeof(text) - len, "[%02X]", segments);
+      }
+    };
+    append(tens, tens_digit);
+    append(units, units_digit);
+    // Drop dark positions at either end, so a single digit has no padding and a dark display is empty.
+    size_t start = 0;
+    while (start < len && text[start] == ' ')
+      start++;
+    while (len > start && text[len - 1] == ' ')
+      len--;
+    this->display_text_sensor_->publish_state(text + start, len - start);
+  }
+
+  if (this->minutes_remaining_sensor_ != nullptr) {
+    // A time only when the units position is a digit and the tens position is a digit or dark. Anything else, such
+    // as an error code or a dark display, is not one.
+    float minutes = NAN;
+    if (units_digit >= 0 && (tens_digit >= 0 || tens == 0))
+      minutes = (tens_digit > 0 ? tens_digit * 10 : 0) + units_digit;
+    this->minutes_remaining_sensor_->publish_state(minutes);
+  }
 }
 
 }  // namespace esphome::whirlpool_spi

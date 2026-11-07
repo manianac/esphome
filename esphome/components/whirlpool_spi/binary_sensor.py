@@ -22,6 +22,9 @@ CONF_SOIL_LEVEL = "soil_level"
 CONF_SPIN_SPEED = "spin_speed"
 CONF_WASH_TEMP = "wash_temp"
 
+# Panel LEDs in MOSI
+CONF_DONE = "done"
+
 _BUTTON_SCHEMA = binary_sensor.binary_sensor_schema()
 
 CONFIG_SCHEMA = cv.Schema(
@@ -38,6 +41,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SPIN_SPEED): _BUTTON_SCHEMA,
         cv.Optional(CONF_WASH_TEMP): _BUTTON_SCHEMA,
         cv.Optional(CONF_DISPENSERS): _BUTTON_SCHEMA,
+        cv.Optional(CONF_DONE): binary_sensor.binary_sensor_schema(),
     }
 )
 
@@ -56,3 +60,4 @@ async def to_code(config: ConfigType) -> None:
     await buttons(CONF_SPIN_SPEED, hub.set_spin_speed_binary_sensor)
     await buttons(CONF_WASH_TEMP, hub.set_wash_temp_binary_sensor)
     await buttons(CONF_DISPENSERS, hub.set_dispensers_binary_sensor)
+    await buttons(CONF_DONE, hub.set_done_binary_sensor)

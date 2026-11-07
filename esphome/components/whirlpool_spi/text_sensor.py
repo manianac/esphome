@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import text_sensor
 import esphome.config_validation as cv
-from esphome.const import ENTITY_CATEGORY_DIAGNOSTIC
+from esphome.const import CONF_DISPLAY, ENTITY_CATEGORY_DIAGNOSTIC
 from esphome.types import ConfigType
 
 from . import CONF_WHIRLPOOL_SPI_ID, WhirlpoolSPI
@@ -39,6 +39,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_FRAME4_MISO): _FRAME_SCHEMA,
         cv.Optional(CONF_FRAME4_MOSI): _FRAME_SCHEMA,
         cv.Optional(CONF_SELECTOR_POSITION_NAME): text_sensor.text_sensor_schema(),
+        cv.Optional(CONF_DISPLAY): text_sensor.text_sensor_schema(),
     }
 )
 
@@ -59,3 +60,4 @@ async def to_code(config: ConfigType) -> None:
     await sensors(
         CONF_SELECTOR_POSITION_NAME, hub.set_selector_position_name_text_sensor
     )
+    await sensors(CONF_DISPLAY, hub.set_display_text_sensor)

@@ -86,8 +86,10 @@ async def to_code(config: ConfigType) -> None:
     if config[CONF_CAPTURE_MODE] == CAPTURE_SPI_PERIPHERAL:
         cg.add_define("USE_WHIRLPOOL_SPI_PERIPHERAL")
     else:
-        # The CLK glitch filter uses a pulse counter
+        # The CLK glitch filter uses a pulse counter, read on every CLK interrupt. Out of IRAM, that read runs from
+        # flash, and a cache miss delays the interrupt enough to lose or corrupt a bit.
         include_builtin_idf_component("esp_driver_pcnt")
+        esp32.add_idf_sdkconfig_option("CONFIG_PCNT_CTRL_FUNC_IN_IRAM", True)
 
     for index, label in config[CONF_SELECTOR_LABELS].items():
         cg.add(var.set_selector_label(index, label))

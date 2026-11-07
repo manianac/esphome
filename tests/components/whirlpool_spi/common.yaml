@@ -13,6 +13,8 @@ sensor:
     whirlpool_spi_id: whirlpool_spi_bus
     selector_position_index:
       name: Selector Position Index
+    minutes_remaining:
+      name: Minutes Remaining
     transfers_per_sec:
       name: Transfers Rate
     buffer_queue:
@@ -61,6 +63,8 @@ text_sensor:
       name: Frame 4 MOSI
     selector_position_name:
       name: Selector Position
+    display:
+      name: Display
 
 binary_sensor:
   - platform: whirlpool_spi
@@ -87,3 +91,5 @@ binary_sensor:
       name: Wash Temp
     dispensers:
       name: Dispensers
+    done:
+      name: Done

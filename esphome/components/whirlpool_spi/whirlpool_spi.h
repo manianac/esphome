@@ -40,6 +40,16 @@ static constexpr uint8_t BUTTON_MASK_SPIN_SPEED = 0x04;    // Frame 4
 static constexpr uint8_t BUTTON_MASK_WASH_TEMP = 0x08;     // Frame 4
 static constexpr uint8_t BUTTON_MASK_DISPENSERS = 0x10;    // Frame 4
 
+// The two-digit 7-segment display. Each digit is the top byte of one frame's MOSI word, bit 0 = segment a ... bit 6 =
+// segment g. Bit 7 belongs to another LED (frame 1's is lit even with the display dark), so it's masked off.
+static constexpr uint32_t DISPLAY_TENS_FRAME = 2;
+static constexpr uint32_t DISPLAY_UNITS_FRAME = 1;
+static constexpr uint8_t DISPLAY_SEGMENTS_MASK = 0x7F;
+
+// The Done light: frame 4 MOSI bit 14, lit from the end of a cycle until the lid is opened.
+static constexpr uint32_t DONE_LED_FRAME = 4;
+static constexpr uint32_t DONE_LED_MASK = 0x00004000;
+
 /// One captured transfer. Data is MSB first: the first bit on the wire is bit 31.
 struct Transfer {
   uint32_t bit_count;
@@ -103,8 +113,10 @@ class WhirlpoolSPI : public PollingComponent {
   SUB_TEXT_SENSOR(frame4_miso)
   SUB_TEXT_SENSOR(frame4_mosi)
   SUB_TEXT_SENSOR(selector_position_name)
+  SUB_TEXT_SENSOR(display)
 
   SUB_SENSOR(selector_position)
+  SUB_SENSOR(minutes_remaining)
 
   // Diagnostics, published every update_interval
   SUB_SENSOR(transfers_per_sec)
@@ -130,6 +142,7 @@ class WhirlpoolSPI : public PollingComponent {
   SUB_BINARY_SENSOR(spin_speed)
   SUB_BINARY_SENSOR(wash_temp)
   SUB_BINARY_SENSOR(dispensers)
+  SUB_BINARY_SENSOR(done)
 
  protected:
 #ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
@@ -140,6 +153,8 @@ class WhirlpoolSPI : public PollingComponent {
 #else
   static void cs_isr_(WhirlpoolSPI *c);
   static void clk_isr_(WhirlpoolSPI *c);
+  /// Clear the shift registers and mark a transfer as running. Called from whichever ISR sees it start first.
+  void begin_transfer_();
   /// Count CLK falling edges through the pulse counter's glitch filter. Returns false if the driver refuses.
   bool start_clk_counter_();
 #endif
@@ -152,6 +167,8 @@ class WhirlpoolSPI : public PollingComponent {
   void process_complete_group_();
   /// Publish the completed frame group to the sensors.
   void publish_frame_group_();
+  /// Publish the display and minutes remaining, if what the display shows has changed.
+  void publish_display_();
   /// Every MISO frame must be one byte repeated four times. Returns true if the group passes.
   bool validate_frame_group_();
 
@@ -168,7 +185,8 @@ class WhirlpoolSPI : public PollingComponent {
 #else
   // Capture state, touched only by the ISRs
   pcnt_unit_handle_t clk_counter_{nullptr};  // Counts CLK falling edges longer than CLK_GLITCH_FILTER_NS
-  int last_clk_count_{0};                    // clk_counter_ at the last accepted falling edge
+  int last_clk_count_{0};                    // clk_counter_ at the last CLK interrupt it confirmed
+  bool in_transfer_{false};                  // CS has been seen low and the transfer not yet pushed
   uint32_t bit_count_{0};                    // Accepted falling edges in the current transfer
   uint32_t miso_shift_{0};                   // MISO bits of the current transfer
   uint32_t mosi_shift_{0};                   // MOSI bits of the current transfer
@@ -205,10 +223,17 @@ class WhirlpoolSPI : public PollingComponent {
 
   // Debounce: a group is accepted once DEBOUNCE_DEPTH valid groups in a row are identical,
   // and only published when it differs from what was last published.
+  // Groups dropped for a missing or bad frame carry no data, so they are skipped rather than breaking the run: with a
+  // wash running, most groups are dropped and a run of DEBOUNCE_DEPTH unbroken groups is rare. A group that fails the
+  // plausibility check does break it.
   FrameGroup candidate_group_{};
   FrameGroup published_group_{};
-  uint8_t match_count_{0};  // Consecutive groups equal to candidate_group_
+  uint8_t match_count_{0};  // Consecutive valid groups equal to candidate_group_
   bool has_published_{false};
+
+  // Display segments last published: tens in the high byte, units in the low byte
+  uint16_t published_display_{0};
+  bool has_published_display_{false};
 
   // Selector position labels (index 0-15) from YAML; nullptr means no label for that position.
   const char *selector_labels_[SELECTOR_LABEL_COUNT]{};

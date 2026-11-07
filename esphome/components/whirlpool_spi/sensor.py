@@ -2,10 +2,12 @@ import esphome.codegen as cg
 from esphome.components import sensor
 import esphome.config_validation as cv
 from esphome.const import (
+    DEVICE_CLASS_DURATION,
     ENTITY_CATEGORY_DIAGNOSTIC,
     ICON_ROTATE_RIGHT,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
+    UNIT_MINUTE,
 )
 from esphome.types import ConfigType
 
@@ -13,6 +15,7 @@ from . import CONF_WHIRLPOOL_SPI_ID, WhirlpoolSPI
 
 DEPENDENCIES = ["whirlpool_spi"]
 
+CONF_MINUTES_REMAINING = "minutes_remaining"
 CONF_SELECTOR_POSITION_INDEX = "selector_position_index"
 
 # Diagnostics, published every update_interval
@@ -43,6 +46,12 @@ CONFIG_SCHEMA = cv.Schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             state_class=STATE_CLASS_MEASUREMENT,
         ),
+        cv.Optional(CONF_MINUTES_REMAINING): sensor.sensor_schema(
+            unit_of_measurement=UNIT_MINUTE,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_DURATION,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
         cv.Optional(CONF_TRANSFERS_PER_SEC): _DIAG_SCHEMA,
         cv.Optional(CONF_BUFFER_QUEUE): _DIAG_SCHEMA,
         cv.Optional(CONF_BUFFER_OVERFLOWS): sensor.sensor_schema(
@@ -66,6 +75,7 @@ async def to_code(config: ConfigType) -> None:
     hub = await cg.get_variable(config[CONF_WHIRLPOOL_SPI_ID])
     sensors = sensor.sub_sensors(config)
     await sensors(CONF_SELECTOR_POSITION_INDEX, hub.set_selector_position_sensor)
+    await sensors(CONF_MINUTES_REMAINING, hub.set_minutes_remaining_sensor)
     await sensors(CONF_TRANSFERS_PER_SEC, hub.set_transfers_per_sec_sensor)
     await sensors(CONF_BUFFER_QUEUE, hub.set_buffer_queue_sensor)
     await sensors(CONF_BUFFER_OVERFLOWS, hub.set_buffer_overflows_sensor)
