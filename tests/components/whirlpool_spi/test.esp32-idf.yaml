@@ -1,0 +1,2 @@
+packages:
+  whirlpool_spi: !include common.yaml

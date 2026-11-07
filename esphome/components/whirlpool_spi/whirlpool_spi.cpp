@@ -1,300 +1,385 @@
 #include "whirlpool_spi.h"
-#include "esphome/core/log.h"
-#include "esphome/core/helpers.h"
+#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
 #include <cinttypes>
 #include <cstdio>
-#include <cstring>
 
-namespace esphome {
-namespace whirlpool_spi {
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 
-// ISR handler for CS transitions (both edges)
-static void IRAM_ATTR cs_isr_handler(WhirlpoolSPI *component) {
-  // Safety checks - these should never happen but prevent crashes if they do
-  if (component == nullptr) {
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+#include "esp_cpu.h"
+#include "esp_intr_alloc.h"
+#include "esp_private/spi_slave_internal.h"  // NOLINT
+#include "esp_rom_gpio.h"
+#include "soc/spi_periph.h"
+#endif
+
+namespace esphome::whirlpool_spi {
+
+ESPHOME_LOG_TAG(TAG, "whirlpool_spi");
+
+// Always inlined so it lands in the calling ISR's IRAM section.
+ESPHOME_ALWAYS_INLINE inline void WhirlpoolSPI::push_transfer_(uint32_t bit_count, uint32_t miso, uint32_t mosi) {
+  const uint32_t head = this->ring_head_.load(std::memory_order_relaxed);
+  const uint32_t used = head - this->ring_tail_.load(std::memory_order_acquire);
+  if (used >= MAX_RECORDS) {
+    this->ring_overflows_.store(this->ring_overflows_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     return;
   }
+  this->transfer_buffer_[head & RING_MASK] = {bit_count, miso, mosi};
+  this->ring_head_.store(head + 1, std::memory_order_release);
+  if (used + 1 > this->ring_peak_.load(std::memory_order_relaxed))
+    this->ring_peak_.store(used + 1, std::memory_order_relaxed);
+}
 
-  // Check if component is properly initialized
-  if (!component->initialized_) {
-    return;  // Component not yet initialized
-  }
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+// Measured on the washer's bus: mode 1 is the only mode that reads MOSI correctly. Mode 0 reads it one bit late, and
+// modes 2 and 3 sample it as it changes, which merges adjacent bits.
+static constexpr int CAPTURE_SPI_MODE = 1;
 
-  // Check current CS state to determine which edge occurred
-  // CS active (low) = falling edge (start of transfer)
-  // CS inactive (high) = rising edge (end of transfer)
-  bool cs_level = component->cs_isr_.digital_read();
+// The two channels complete the same frame within microseconds of each other, and the next frame is about a
+// millisecond away, so a partner older than this can only be left over from a frame the other channel missed.
+static constexpr uint32_t CHANNEL_PAIR_WINDOW_CYCLES = 300 * CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
 
-  if (cs_level == 0) {
-    // CS is low - start of transfer
-    component->cs_active_ = true;
-    component->bit_count_ = 0;
-    component->data_miso_ = 0;
-    component->data_mosi_ = 0;
-  } else {
-    // CS is high - end of transfer
-    component->cs_active_ = false;
+// Both channels' interrupts have the same priority on the same core, so this never preempts itself.
+void IRAM_ATTR WhirlpoolSPI::channel_transfer_done_(spi_slave_transaction_t *trans) {  // NOLINT
+  // Read the pins before anything else, while the data line still holds the frame's last bit
+  const uint32_t in = REG_READ(GPIO_IN_REG);
+  auto *channel = static_cast<CaptureChannel *>(trans->user);
+  WhirlpoolSPI *c = channel->parent;
+  channel->end_inputs = in;
 
-    // Append to ring buffer if there's space (prevent buffer overflow)
-    if (component->buffer_count_ < component->buffer_size_ && component->write_idx_ < component->buffer_size_) {
-      component->transfer_buffer_[component->write_idx_].bit_count = component->bit_count_;
-      component->transfer_buffer_[component->write_idx_].data_miso = component->data_miso_;
-      component->transfer_buffer_[component->write_idx_].data_mosi = component->data_mosi_;
+  // Received bytes land in memory in wire order, so swap to put the first bit on the wire at bit 31.
+  channel->data = __builtin_bswap32(channel->rx_buffer[0]);
+  channel->bit_count = trans->trans_len;
+  channel->completed_at = esp_cpu_get_cycle_count();
+  channel->pending = true;
 
-      component->write_idx_ = (component->write_idx_ + 1) % component->buffer_size_;
-      component->buffer_count_++;
+  CaptureChannel *other = channel == &c->miso_channel_ ? &c->mosi_channel_ : &c->miso_channel_;
+  if (other->pending) {
+    if (channel->completed_at - other->completed_at <= CHANNEL_PAIR_WINDOW_CYCLES) {
+      // If the channels disagree on length, report whichever is wrong so the frame is rejected.
+      const uint32_t bit_count = channel->bit_count == EXPECTED_BITS ? other->bit_count : channel->bit_count;
+      // A CS pulse with no clocks carries no data, so don't let it disturb the frame-group state machine.
+      if (bit_count != 0) {
+        // On this bus MISO only changes after each rising clock edge, so the peripheral samples every MISO bit one
+        // clock late and the frame's last bit arrives after the last edge. Shift the sampled bits back into place
+        // and take the last bit from the line, which holds it until the next frame's first clock edge.
+        const uint32_t inputs = c->miso_channel_.end_inputs;
+        const uint32_t miso = (c->miso_channel_.data << 1) | ((inputs >> c->miso_channel_.data_bit) & 1);
+        // CS low again means this ran so late that the next frame had started and the line may have moved on.
+        // Count the frame as one bit short so it's rejected.
+        const bool last_bit_read = (inputs >> c->cs_bit_) & 1;
+        const uint32_t reported_bits = bit_count == EXPECTED_BITS && !last_bit_read ? EXPECTED_BITS - 1 : bit_count;
+        c->push_transfer_(reported_bits, miso, c->mosi_channel_.data);
+      }
+      channel->pending = false;
+    } else {
+      c->channel_desyncs_.store(c->channel_desyncs_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     }
+    other->pending = false;
+  }
+
+  // Re-arm from here rather than from loop(), so capture never depends on the main loop keeping up. This transaction
+  // is the only one the channel ever uses and the driver has already dequeued it, so its queue always has room.
+  spi_slave_queue_trans_isr(channel->host, trans);  // NOLINT
+}
+#else
+// Pulses on CLK shorter than this are ignored. Real CLK phases are at least 4.5 us and the glitches on the washer's CLK
+// line are under 141 ns. The counter registers an edge this long after it happens, which is still well before the
+// CLK interrupt gets to read it.
+static constexpr uint32_t CLK_GLITCH_FILTER_NS = 500;
+
+// ISR for CS transitions (both edges).
+void IRAM_ATTR WhirlpoolSPI::cs_isr_(WhirlpoolSPI *c) {
+  const uint32_t in = REG_READ(GPIO_IN_REG);
+
+  if (((in >> c->cs_bit_) & 1) == 0) {
+    // CS low: start of transfer. Clearing here also discards any clock edges seen while CS was high.
+    c->bit_count_ = 0;
+    c->miso_shift_ = 0;
+    c->mosi_shift_ = 0;
+    pcnt_unit_get_count(c->clk_counter_, &c->last_clk_count_);
+    return;
+  }
+
+  // CS high: end of transfer.
+  // A CS pulse with no clocks carries no data, so don't let it disturb the frame-group state machine.
+  if (c->bit_count_ != 0) {
+    // Each falling edge sampled the MISO bit before its own, so shift those into place and take the last bit from
+    // the line, which holds it until the next frame's first clock edge.
+    c->push_transfer_(c->bit_count_, (c->miso_shift_ << 1) | ((in >> c->miso_bit_) & 1), c->mosi_shift_);
   }
 }
 
-// ISR handler for CLK rising edge
-static void IRAM_ATTR clk_isr_handler(WhirlpoolSPI *component) {
-  // Safety checks
-  if (component == nullptr) {
+// ISR for CLK falling edges. On this bus MOSI changes at the falling edge and MISO a few microseconds after the rising
+// edge, so just after a falling edge both are settled: MOSI holds the bit about to be clocked and MISO the one before.
+// Every glitch on CLK raises an interrupt of its own, so an edge only counts if the filtered pulse counter saw it too.
+void IRAM_ATTR WhirlpoolSPI::clk_isr_(WhirlpoolSPI *c) {
+  const uint32_t in = REG_READ(GPIO_IN_REG);
+  int count;
+  pcnt_unit_get_count(c->clk_counter_, &count);
+  if (count == c->last_clk_count_) {
+    c->clk_glitches_.store(c->clk_glitches_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     return;
   }
-
-  // Check if component is properly initialized
-  if (!component->initialized_) {
-    return;  // Component not yet initialized
-  }
-
-  // Only capture if CS is active
-  if (!component->cs_active_) {
-    return;
-  }
-
-  // Stop capturing once we have all expected bits - extra CLK edges are noise
-  if (component->bit_count_ >= 64) {
-    return;
-  }
-
-  uint32_t bit_idx = 63 - component->bit_count_;  // MSB first in uint64_t
-
-  // Only set 1-bits; data is zeroed at CS start so 0-bits are already correct
-  if (component->miso_isr_.digital_read()) {
-    component->data_miso_ |= (1ULL << bit_idx);
-  }
-
-  if (component->mosi_isr_.digital_read()) {
-    component->data_mosi_ |= (1ULL << bit_idx);
-  }
-
-  component->bit_count_++;
+  c->last_clk_count_ = count;
+  c->miso_shift_ = (c->miso_shift_ << 1) | ((in >> c->miso_bit_) & 1);
+  c->mosi_shift_ = (c->mosi_shift_ << 1) | ((in >> c->mosi_bit_) & 1);
+  c->bit_count_++;
 }
+#endif  // USE_WHIRLPOOL_SPI_PERIPHERAL
 
 void WhirlpoolSPI::setup() {
-  ESP_LOGD(TAG, "Setting up Whirlpool SPI monitor");
-
-  // Validate all pins are set
-  if (this->miso_pin_ == nullptr || this->mosi_pin_ == nullptr || this->cs_pin_ == nullptr ||
-      this->clk_pin_ == nullptr) {
-    ESP_LOGE(TAG, "Setup failed: One or more pins not configured");
-    this->mark_failed();
-    return;
-  }
-
-  // Setup pins as inputs (we're monitoring external SPI)
+  // Inputs only: this monitors a bus that belongs to the washer
   this->miso_pin_->setup();
   this->mosi_pin_->setup();
   this->cs_pin_->setup();
   this->clk_pin_->setup();
+  this->cs_bit_ = this->cs_pin_->get_pin();
 
-  // Prepare ISR-safe pin access (no virtual calls inside interrupts)
-  this->miso_isr_ = this->miso_pin_->to_isr();
-  this->mosi_isr_ = this->mosi_pin_->to_isr();
-  this->cs_isr_ = this->cs_pin_->to_isr();
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+  // Each peripheral has one data input, so capturing both lines takes two, with the washer's MISO fed into the second
+  // peripheral's MOSI input.
+  if (!this->start_capture_channel_(this->miso_channel_, SPI3_HOST, this->miso_pin_) ||
+      !this->start_capture_channel_(this->mosi_channel_, SPI2_HOST, this->mosi_pin_)) {
+    this->mark_failed();
+    return;
+  }
+#else
+  this->miso_bit_ = this->miso_pin_->get_pin();
+  this->mosi_bit_ = this->mosi_pin_->get_pin();
+  if (!this->start_clk_counter_()) {
+    this->mark_failed();
+    return;
+  }
+#endif
 
-  // Initialize state (critical - ISRs will read these)
-  this->bit_count_ = 0;
-  this->cs_active_ = false;
-  this->data_miso_ = 0;
-  this->data_mosi_ = 0;
-  this->buffer_count_ = 0;
-  this->write_idx_ = 0;
-  this->read_idx_ = 0;
+  // This is a passive tap on the washer's bus: if any of its pins can drive, stop and say so.
+  const uint32_t bus_pins = (1UL << this->miso_pin_->get_pin()) | (1UL << this->mosi_pin_->get_pin()) |
+                            (1UL << this->cs_pin_->get_pin()) | (1UL << this->clk_pin_->get_pin());
+  if ((REG_READ(GPIO_ENABLE_REG) & bus_pins) != 0) {
+    ESP_LOGE(TAG, "A bus pin is configured as an output (GPIO_ENABLE=0x%08" PRIX32 ")", REG_READ(GPIO_ENABLE_REG));
+    this->mark_failed();
+    return;
+  }
 
-  // Register ISR handlers using the framework GPIO wrapper
-  // This keeps all interrupt setup within ESPHome's GPIO abstraction
-  this->clk_pin_->attach_interrupt(clk_isr_handler, this, gpio::INTERRUPT_RISING_EDGE);
-  this->cs_pin_->attach_interrupt(cs_isr_handler, this, gpio::INTERRUPT_ANY_EDGE);
-
-  // FINALLY: Mark component as initialized
-  // This allows ISRs to start firing
-  this->initialized_ = true;
-
-  ESP_LOGI(TAG, "Whirlpool SPI monitor setup complete");
+#ifndef USE_WHIRLPOOL_SPI_PERIPHERAL
+  this->clk_pin_->attach_interrupt(WhirlpoolSPI::clk_isr_, this, gpio::INTERRUPT_FALLING_EDGE);
+  this->cs_pin_->attach_interrupt(WhirlpoolSPI::cs_isr_, this, gpio::INTERRUPT_ANY_EDGE);
+#endif
 }
+
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+bool WhirlpoolSPI::start_capture_channel_(CaptureChannel &channel, spi_host_device_t host, InternalGPIOPin *data_pin) {
+  // Every pin is -1 so the driver leaves the pads alone. Given real pins it sets them to input-output and connects the
+  // peripheral's outputs, before the peripheral is even set up as a receiver, which has no place on a passive tap.
+  spi_bus_config_t bus{};
+  bus.mosi_io_num = -1;
+  bus.miso_io_num = -1;
+  bus.sclk_io_num = -1;
+  bus.quadwp_io_num = -1;
+  bus.quadhd_io_num = -1;
+  bus.intr_flags = ESP_INTR_FLAG_LEVEL3;
+
+  spi_slave_interface_config_t device{};  // NOLINT
+  device.spics_io_num = -1;
+  device.flags = SPI_SLAVE_NO_RETURN_RESULT;  // NOLINT
+  device.queue_size = 1;
+  device.mode = CAPTURE_SPI_MODE;
+  device.post_trans_cb = WhirlpoolSPI::channel_transfer_done_;
+
+  esp_err_t err = spi_slave_initialize(host, &bus, &device, SPI_DMA_DISABLED);  // NOLINT
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "SPI driver init failed on host %d: %s", host, esp_err_to_name(err));
+    return false;
+  }
+
+  // Input-only routing. The pads were set up as plain inputs by setup(), and this adds no path back out to them.
+  const spi_signal_conn_t &signals = spi_periph_signal[host];
+  esp_rom_gpio_connect_in_signal(this->clk_pin_->get_pin(), signals.spiclk_in, false);
+  esp_rom_gpio_connect_in_signal(this->cs_pin_->get_pin(), signals.spics_in, false);
+  esp_rom_gpio_connect_in_signal(data_pin->get_pin(), signals.spid_in, false);
+
+  channel.parent = this;
+  channel.host = host;
+  channel.data_bit = data_pin->get_pin();
+  channel.transaction.length = sizeof(channel.rx_buffer) * 8;
+  channel.transaction.rx_buffer = channel.rx_buffer;
+  channel.transaction.user = &channel;
+  err = spi_slave_queue_trans(host, &channel.transaction, 0);  // NOLINT
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "SPI driver queue failed on host %d: %s", host, esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+#endif
+
+#ifndef USE_WHIRLPOOL_SPI_PERIPHERAL
+bool WhirlpoolSPI::start_clk_counter_() {
+  pcnt_unit_config_t unit_config{};
+  unit_config.low_limit = -1;
+  unit_config.high_limit = INT16_MAX;  // The count wraps to 0 here, which is fine: only changes in it matter
+  pcnt_glitch_filter_config_t filter{};
+  filter.max_glitch_ns = CLK_GLITCH_FILTER_NS;
+  pcnt_chan_config_t channel_config{};
+  channel_config.edge_gpio_num = this->clk_pin_->get_pin();
+  channel_config.level_gpio_num = -1;
+  channel_config.flags.virt_level_io_level = 1;
+  pcnt_channel_handle_t channel = nullptr;
+  if (pcnt_new_unit(&unit_config, &this->clk_counter_) != ESP_OK ||
+      pcnt_unit_set_glitch_filter(this->clk_counter_, &filter) != ESP_OK ||
+      pcnt_new_channel(this->clk_counter_, &channel_config, &channel) != ESP_OK ||
+      pcnt_channel_set_edge_action(channel, PCNT_CHANNEL_EDGE_ACTION_HOLD, PCNT_CHANNEL_EDGE_ACTION_INCREASE) !=
+          ESP_OK ||
+      pcnt_channel_set_level_action(channel, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_KEEP) !=
+          ESP_OK ||
+      pcnt_unit_enable(this->clk_counter_) != ESP_OK || pcnt_unit_start(this->clk_counter_) != ESP_OK) {
+    ESP_LOGE(TAG, "CLK pulse counter setup failed");
+    return false;
+  }
+  // The driver turns on CLK's pull-up. Put back the pin mode from the configuration; the counter's input stays routed.
+  this->clk_pin_->setup();
+  return true;
+}
+#endif
 
 void WhirlpoolSPI::dump_config() {
   ESP_LOGCONFIG(TAG, "Whirlpool SPI Monitor:");
+  LOG_UPDATE_INTERVAL(this);
   LOG_PIN("  MISO Pin: ", this->miso_pin_);
   LOG_PIN("  MOSI Pin: ", this->mosi_pin_);
   LOG_PIN("  CS Pin: ", this->cs_pin_);
   LOG_PIN("  CLK Pin: ", this->clk_pin_);
-  ESP_LOGCONFIG(TAG, "  Expected Bits: %u  Buffer Size: %u/%u  Error Frames: %u", this->expected_bits_,
-                this->buffer_size_, MAX_RECORDS, this->error_frames_);
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+  ESP_LOGCONFIG(TAG, "  Capture: SPI peripherals");
+#else
+  ESP_LOGCONFIG(TAG, "  Capture: GPIO interrupts, CLK glitch filter %" PRIu32 " ns", CLK_GLITCH_FILTER_NS);
+#endif
+  ESP_LOGCONFIG(TAG, "  Expected Bits: %" PRIu32 "  Buffer Size: %" PRIu32, EXPECTED_BITS, MAX_RECORDS);
 }
 
 void WhirlpoolSPI::loop() {
-  // Snapshot buffer status before processing
-  uint32_t initial_count;
-  {
-    InterruptLock lock;
-    initial_count = this->buffer_count_;
+  // Work through what was queued on entry. Anything arriving meanwhile waits for the next pass,
+  // so a busy bus can't hold up the main loop.
+  const uint32_t head = this->ring_head_.load(std::memory_order_acquire);
+  uint32_t tail = this->ring_tail_.load(std::memory_order_relaxed);
+  const uint32_t queued = head - tail;
+
+  // Warn if the queue is building up, at most once a second
+  const uint32_t now = App.get_loop_component_start_time();
+  if (queued > MAX_RECORDS / 2 && now - this->last_status_log_ > 1000) {
+    ESP_LOGW(TAG, "Buffer accumulation: %" PRIu32 "/%" PRIu32 " transfers queued (loop may be slow)", queued,
+             MAX_RECORDS);
+    this->last_status_log_ = now;
   }
 
-  // Log buffer status if queue is building up (only log periodically to avoid spam)
-  static uint32_t last_status_log = 0;
-  uint32_t now_ms = millis();
-  if (initial_count > this->buffer_size_ / 2 && (now_ms - last_status_log) > 1000) {
-    // Buffer is >50% full - might be a throughput issue
-    ESP_LOGW(TAG, "Buffer accumulation: %d/%d transfers queued (loop may be slow)", initial_count, this->buffer_size_);
-    last_status_log = now_ms;
+  for (; tail != head; tail++) {
+    // Copy the slot out before releasing it to the ISR
+    const Transfer frame = this->transfer_buffer_[tail & RING_MASK];
+    this->ring_tail_.store(tail + 1, std::memory_order_release);
+    this->process_frame_(frame);
   }
 
-  uint32_t processed = 0;
-  // Process all buffered transfers from the ring buffer.
-  // This is safe to drain fully because the heavy publish_state() calls
-  // have been moved to update(); each iteration here is just an
-  // InterruptLock + lightweight state-machine work.
-  while (this->buffer_count_ > 0) {
-    uint32_t bit_count;
-    uint64_t miso_data;
-    uint64_t mosi_data;
+  this->accum_processed_ += queued;
+  this->last_buffer_queue_ = queued;
+}
 
-    // Block interrupts to safely read and remove from ring buffer
-    {
-      InterruptLock lock;
-      if (this->buffer_count_ == 0) {
-        break;  // Safety check in case buffer emptied
-      }
-
-      bit_count = this->transfer_buffer_[this->read_idx_].bit_count;
-      miso_data = this->transfer_buffer_[this->read_idx_].data_miso;
-      mosi_data = this->transfer_buffer_[this->read_idx_].data_mosi;
-
-      this->read_idx_ = (this->read_idx_ + 1) % this->buffer_size_;
-      this->buffer_count_--;
+void WhirlpoolSPI::process_frame_(const Transfer &frame) {
+  // Check if this frame has the expected number of bits
+  if (frame.bit_count != EXPECTED_BITS) {
+    this->error_frames_++;
+    if (frame.bit_count < EXPECTED_BITS) {
+      this->error_under_++;
+    } else {
+      this->error_over_++;
     }
-    processed++;
+    ESP_LOGV(TAG, "REJECTED Bits: %2" PRIu32 " / %2" PRIu32 "  |  MISO: %08" PRIX32 "  |  MOSI: %08" PRIX32,
+             frame.bit_count, EXPECTED_BITS, frame.data_miso, frame.data_mosi);
 
-    // Check if this frame has the expected number of bits
-    if (bit_count != this->expected_bits_) {
-      if (bit_count > 0) {
-        // Track rejected transfers
-        this->error_frames_++;
-        if (bit_count < this->expected_bits_) {
-          this->error_under_++;
-        } else {
-          this->error_over_++;
-        }
-        ESP_LOGV(TAG, "REJECTED Bits: %2d / %2d  |  MISO: %016llx  |  MOSI: %016llx", bit_count, this->expected_bits_,
-                 (unsigned long long) miso_data, (unsigned long long) mosi_data);
-      }
-
-      // Bad frame: if we were mid-group, drop the entire group
-      if (this->frame_group_synced_ && this->frame_group_pos_ > 0) {
-        ESP_LOGV(TAG, "Frame group dropped at position %u (bad bit count %u)", this->frame_group_pos_, bit_count);
-        this->groups_dropped_++;
-        this->frame_group_pos_ = 0;
-        this->frame_group_synced_ = false;
-        // Invalidate debounce history — stream was disrupted
-        this->history_count_ = 0;
-      }
-      continue;
-    }
-
-    // Valid frame - log it
-    this->accum_valid_frames_++;
-    ESP_LOGVV(TAG, "Bits: %2d  |  MISO: %016llx  |  MOSI: %016llx", bit_count, (unsigned long long) miso_data,
-              (unsigned long long) mosi_data);
-
-    // --- Frame-group state machine ---
-    // Extract the upper 32 bits of MISO to check for the marker
-    uint32_t miso_upper = static_cast<uint32_t>(miso_data >> 32);
-    bool is_marker = (miso_upper == MARKER_MISO_UPPER);
-
-    if (is_marker) {
-      // Marker frame detected - (re)start a new group
-      if (this->frame_group_synced_ && this->frame_group_pos_ > 0) {
-        // We were mid-group but got a new marker - drop the incomplete group
-        ESP_LOGV(TAG, "Frame group dropped at position %u (new marker arrived early)", this->frame_group_pos_);
-        this->groups_dropped_++;
-        // Invalidate debounce history — stream was disrupted
-        this->history_count_ = 0;
-      }
-      this->frame_group_synced_ = true;
+    // Bad frame: if we were mid-group, drop the entire group
+    if (this->frame_group_pos_ > 0) {
+      ESP_LOGV(TAG, "Frame group dropped at position %" PRIu32 " (bad bit count %" PRIu32 ")", this->frame_group_pos_,
+               frame.bit_count);
+      this->groups_dropped_++;
       this->frame_group_pos_ = 0;
-      this->frame_group_[0].bit_count = bit_count;
-      this->frame_group_[0].data_miso = miso_data;
-      this->frame_group_[0].data_mosi = mosi_data;
-      this->frame_group_pos_ = 1;  // Next expected position
-    } else if (this->frame_group_synced_ && this->frame_group_pos_ > 0) {
-      // Non-marker frame while we're accumulating a group
-      uint32_t pos = this->frame_group_pos_;
-      this->frame_group_[pos].bit_count = bit_count;
-      this->frame_group_[pos].data_miso = miso_data;
-      this->frame_group_[pos].data_mosi = mosi_data;
-      this->frame_group_pos_ = pos + 1;
-
-      // Check if the group is now complete
-      if (this->frame_group_pos_ == FRAME_GROUP_SIZE) {
-        this->frame_group_pos_ = 0;
-        // Group stays synced - we'll look for the next marker
-
-        // Run plausibility checks before accepting
-        if (!this->validate_frame_group_()) {
-          this->groups_failed_plausibility_++;
-          ESP_LOGV(TAG, "Frame group failed plausibility check (total failures: %u)",
-                   this->groups_failed_plausibility_);
-          continue;
-        }
-
-        this->groups_completed_++;
-
-        // --- Consecutive-match debounce ---
-        // Write the validated group into the next history slot.
-        memcpy(this->frame_group_history_[this->history_write_idx_], this->frame_group_,
-               sizeof(Transfer) * FRAME_GROUP_SIZE);
-        this->history_write_idx_ = (this->history_write_idx_ + 1) % DEBOUNCE_DEPTH;
-        if (this->history_count_ < DEBOUNCE_DEPTH) {
-          this->history_count_++;
-        }
-
-        // Only publish once all slots are filled and every slot matches slot 0.
-        bool consensus = (this->history_count_ >= DEBOUNCE_DEPTH);
-        if (consensus) {
-          for (uint32_t d = 1; d < DEBOUNCE_DEPTH; d++) {
-            if (!frame_groups_match_(this->frame_group_history_[0], this->frame_group_history_[d])) {
-              consensus = false;
-              break;
-            }
-          }
-        }
-
-        if (consensus) {
-          ESP_LOGV(TAG, "Frame group #%u published (debounce %u/%u confirmed):", this->groups_completed_,
-                   DEBOUNCE_DEPTH, DEBOUNCE_DEPTH);
-          for (uint32_t i = 0; i < FRAME_GROUP_SIZE; i++) {
-            ESP_LOGV(TAG, "  [%u] MISO: %016llx  MOSI: %016llx", i,
-                     (unsigned long long) this->frame_group_[i].data_miso,
-                     (unsigned long long) this->frame_group_[i].data_mosi);
-          }
-          this->publish_frame_group_();
-        } else {
-          ESP_LOGV(TAG, "Frame group #%u awaiting debounce consensus (%u/%u)", this->groups_completed_,
-                   this->history_count_, DEBOUNCE_DEPTH);
-        }
-      }
+      // Invalidate debounce history: the stream was disrupted
+      this->match_count_ = 0;
     }
-    // else: non-marker frame and not synced - just ignore it
+    return;
   }
 
-  // Accumulate counters for the next update() cycle
-  this->accum_processed_ += processed;
-  this->last_buffer_queue_ = initial_count;
+  this->accum_valid_frames_++;
+  ESP_LOGVV(TAG, "Bits: %2" PRIu32 "  |  MISO: %08" PRIX32 "  |  MOSI: %08" PRIX32, frame.bit_count, frame.data_miso,
+            frame.data_mosi);
+
+  // --- Frame-group state machine ---
+  if (frame.data_miso == MARKER_MISO) {
+    // Marker frame detected - (re)start a new group
+    if (this->frame_group_pos_ > 0) {
+      // We were mid-group but got a new marker - drop the incomplete group
+      ESP_LOGV(TAG, "Frame group dropped at position %" PRIu32 " (new marker arrived early)", this->frame_group_pos_);
+      this->groups_dropped_++;
+      // Invalidate debounce history: the stream was disrupted
+      this->match_count_ = 0;
+    }
+    this->frame_group_pos_ = 0;
+  } else if (this->frame_group_pos_ == 0) {
+    return;  // Non-marker frame while waiting for a marker
+  }
+
+  const uint32_t pos = this->frame_group_pos_;
+  this->frame_group_.miso[pos] = frame.data_miso;
+  this->frame_group_.mosi[pos] = frame.data_mosi;
+
+  if (pos + 1 < FRAME_GROUP_SIZE) {
+    this->frame_group_pos_ = pos + 1;
+    return;
+  }
+  this->frame_group_pos_ = 0;
+  this->process_complete_group_();
+}
+
+void WhirlpoolSPI::process_complete_group_() {
+  // Run plausibility checks before accepting
+  if (!this->validate_frame_group_()) {
+    this->groups_failed_plausibility_++;
+    this->match_count_ = 0;
+    ESP_LOGV(TAG, "Frame group failed plausibility check");
+    return;
+  }
+
+  this->groups_completed_++;
+
+  // --- Consecutive-match debounce ---
+  if (this->match_count_ > 0 && this->frame_group_ == this->candidate_group_) {
+    if (this->match_count_ < DEBOUNCE_DEPTH)
+      this->match_count_++;
+  } else {
+    this->candidate_group_ = this->frame_group_;
+    this->match_count_ = 1;
+  }
+
+  if (this->match_count_ < DEBOUNCE_DEPTH) {
+    ESP_LOGV(TAG, "Frame group awaiting debounce consensus (%u/%" PRIu32 ")", this->match_count_, DEBOUNCE_DEPTH);
+    return;
+  }
+
+  // The bus repeats the same group hundreds of times a second; only a change is worth publishing.
+  if (this->has_published_ && this->frame_group_ == this->published_group_)
+    return;
+
+  this->published_group_ = this->frame_group_;
+  this->has_published_ = true;
+  for (uint32_t i = 0; i < FRAME_GROUP_SIZE; i++) {
+    ESP_LOGV(TAG, "  [%" PRIu32 "] MISO: %08" PRIX32 "  MOSI: %08" PRIX32, i, this->frame_group_.miso[i],
+             this->frame_group_.mosi[i]);
+  }
+  this->publish_frame_group_();
 }
 
 void WhirlpoolSPI::update() {
@@ -309,18 +394,31 @@ void WhirlpoolSPI::update() {
   float groups_completed_ps = (interval_sec > 0) ? this->groups_completed_ / interval_sec : 0;
   float groups_dropped_ps = (interval_sec > 0) ? this->groups_dropped_ / interval_sec : 0;
   float groups_failed_ps = (interval_sec > 0) ? this->groups_failed_plausibility_ / interval_sec : 0;
+  const uint32_t overflows = this->ring_overflows_.load(std::memory_order_relaxed);
+  const uint32_t peak = this->ring_peak_.exchange(0, std::memory_order_relaxed);
 
-  ESP_LOGD(TAG, "Rates (/s): transfers=%.1f, valid=%.1f, errors=%.1f (under=%.1f, over=%.1f), queue=%d/%d",
+  ESP_LOGD(TAG,
+           "Rates (/s): transfers=%.1f, valid=%.1f, errors=%.1f (under=%.1f, over=%.1f), queue=%" PRIu32 "/%" PRIu32
+           ", peak=%" PRIu32 ", overflows=%" PRIu32,
            transfers_ps, valid_frames_ps, error_frames_ps, error_under_ps, error_over_ps, this->last_buffer_queue_,
-           this->buffer_size_);
+           MAX_RECORDS, peak, overflows);
   ESP_LOGD(TAG, "Groups (/s): completed=%.2f, dropped=%.2f, failed_plausibility=%.2f", groups_completed_ps,
            groups_dropped_ps, groups_failed_ps);
+#ifdef USE_WHIRLPOOL_SPI_PERIPHERAL
+  ESP_LOGD(TAG, "Channel desyncs since boot: %" PRIu32, this->channel_desyncs_.load(std::memory_order_relaxed));
+#else
+  ESP_LOGD(TAG, "CLK glitches rejected since boot: %" PRIu32, this->clk_glitches_.load(std::memory_order_relaxed));
+#endif
 
   // Publish to diagnostic sensors (all rates are per-second; buffer_queue is a snapshot)
   if (this->transfers_per_sec_sensor_ != nullptr)
     this->transfers_per_sec_sensor_->publish_state(transfers_ps);
   if (this->buffer_queue_sensor_ != nullptr)
     this->buffer_queue_sensor_->publish_state(this->last_buffer_queue_);
+  if (this->buffer_overflows_sensor_ != nullptr)
+    this->buffer_overflows_sensor_->publish_state(overflows);
+  if (this->buffer_peak_sensor_ != nullptr)
+    this->buffer_peak_sensor_->publish_state(peak);
   if (this->valid_frames_sensor_ != nullptr)
     this->valid_frames_sensor_->publish_state(valid_frames_ps);
   if (this->error_frames_sensor_ != nullptr)
@@ -348,15 +446,17 @@ void WhirlpoolSPI::update() {
 }
 
 bool WhirlpoolSPI::validate_frame_group_() {
-  // --- All MISO frames: upper 32 bits must be a single byte repeated 4 times ---
+  // --- All MISO frames: must be a single byte repeated 4 times ---
   // e.g. 0x00000000, 0x02020202, 0x12121212, etc.
   for (uint32_t i = 0; i < FRAME_GROUP_SIZE; i++) {
-    uint32_t upper = static_cast<uint32_t>(this->frame_group_[i].data_miso >> 32);
-    uint8_t byte_val = upper & 0xFF;
-    uint32_t expected = byte_val * 0x01010101u;
-    if (upper != expected) {
-      ESP_LOGV(TAG, "Plausibility FAIL: frame %u MISO upper=0x%08X (expected repeated 0x%02X -> 0x%08X)", i, upper,
-               byte_val, expected);
+    const uint32_t miso = this->frame_group_.miso[i];
+    const uint8_t byte_val = miso & 0xFF;
+    const uint32_t expected = byte_val * 0x01010101u;
+    if (miso != expected) {
+      ESP_LOGV(TAG,
+               "Plausibility FAIL: frame %" PRIu32 " MISO=0x%08" PRIX32 " (expected repeated 0x%02X -> 0x%08" PRIX32
+               ")",
+               i, miso, byte_val, expected);
       return false;
     }
   }
@@ -364,40 +464,31 @@ bool WhirlpoolSPI::validate_frame_group_() {
   return true;
 }
 
-bool WhirlpoolSPI::frame_groups_match_(const Transfer *a, const Transfer *b) {
-  for (uint32_t i = 0; i < FRAME_GROUP_SIZE; i++) {
-    if (a[i].data_miso != b[i].data_miso || a[i].data_mosi != b[i].data_mosi)
-      return false;
-  }
-  return true;
-}
-
 void WhirlpoolSPI::publish_frame_group_() {
-  // Format upper 32 bits as 8-char hex string (lower 32 bits are always zero)
   char buf[9];  // 8 hex chars + null terminator
 
   // Helper lambda to format and publish
-  auto publish = [&buf](text_sensor::TextSensor *sensor, uint64_t data) {
+  auto publish = [&buf](text_sensor::TextSensor *sensor, uint32_t data) {
     if (sensor == nullptr)
       return;
-    snprintf(buf, sizeof(buf), "%08X", static_cast<uint32_t>(data >> 32));
+    snprintf(buf, sizeof(buf), "%08" PRIX32, data);
     sensor->publish_state(buf);
   };
 
-  publish(this->frame0_miso_text_sensor_, this->frame_group_[0].data_miso);
-  publish(this->frame0_mosi_text_sensor_, this->frame_group_[0].data_mosi);
-  publish(this->frame1_miso_text_sensor_, this->frame_group_[1].data_miso);
-  publish(this->frame1_mosi_text_sensor_, this->frame_group_[1].data_mosi);
-  publish(this->frame2_miso_text_sensor_, this->frame_group_[2].data_miso);
-  publish(this->frame2_mosi_text_sensor_, this->frame_group_[2].data_mosi);
-  publish(this->frame3_miso_text_sensor_, this->frame_group_[3].data_miso);
-  publish(this->frame3_mosi_text_sensor_, this->frame_group_[3].data_mosi);
-  publish(this->frame4_miso_text_sensor_, this->frame_group_[4].data_miso);
-  publish(this->frame4_mosi_text_sensor_, this->frame_group_[4].data_mosi);
+  publish(this->frame0_miso_text_sensor_, this->frame_group_.miso[0]);
+  publish(this->frame0_mosi_text_sensor_, this->frame_group_.mosi[0]);
+  publish(this->frame1_miso_text_sensor_, this->frame_group_.miso[1]);
+  publish(this->frame1_mosi_text_sensor_, this->frame_group_.mosi[1]);
+  publish(this->frame2_miso_text_sensor_, this->frame_group_.miso[2]);
+  publish(this->frame2_mosi_text_sensor_, this->frame_group_.mosi[2]);
+  publish(this->frame3_miso_text_sensor_, this->frame_group_.miso[3]);
+  publish(this->frame3_mosi_text_sensor_, this->frame_group_.mosi[3]);
+  publish(this->frame4_miso_text_sensor_, this->frame_group_.miso[4]);
+  publish(this->frame4_mosi_text_sensor_, this->frame_group_.mosi[4]);
 
   // --- Derived values from validated frame data ---
   // Raw byte from frame 1 MISO has bit 0 always 0; bits [4:1] form the index.
-  uint8_t selector_raw = static_cast<uint8_t>(this->frame_group_[1].data_miso >> 32);
+  uint8_t selector_raw = static_cast<uint8_t>(this->frame_group_.miso[1]);
   uint8_t selector_idx = selector_raw >> 1;  // 0–15
 
   // Selector position (shifted index)
@@ -407,20 +498,18 @@ void WhirlpoolSPI::publish_frame_group_() {
 
   // Selector position name (mapped from YAML-configured labels)
   if (this->selector_position_name_text_sensor_ != nullptr) {
-    if (selector_idx < SELECTOR_LABEL_COUNT && !this->selector_labels_[selector_idx].empty()) {
+    if (selector_idx < SELECTOR_LABEL_COUNT && this->selector_labels_[selector_idx] != nullptr) {
       this->selector_position_name_text_sensor_->publish_state(this->selector_labels_[selector_idx]);
     } else {
-      // No label configured for this position — publish index
+      // No label configured for this position: publish the index
       snprintf(buf, sizeof(buf), "%u", selector_idx);
       this->selector_position_name_text_sensor_->publish_state(buf);
     }
   }
 
-  // --- Butt5on binary sensors (derived from frame MISO upper bytes) ---
-  uint8_t f2miso_byte = static_cast<uint8_t>(this->frame_group_[2].data_miso >> 32);
-  uint8_t f3miso_byte = static_cast<uint8_t>(this->frame_group_[3].data_miso >> 32);
-  uint8_t f4miso_byte = static_cast<uint8_t>(this->frame_group_[4].data_miso >> 32);
-  uint8_t f5miso_byte = static_cast<uint8_t>(this->frame_group_[5].data_miso >> 32);
+  // --- Button binary sensors (derived from frame MISO bytes) ---
+  uint8_t f3miso_byte = static_cast<uint8_t>(this->frame_group_.miso[3]);
+  uint8_t f4miso_byte = static_cast<uint8_t>(this->frame_group_.miso[4]);
 
   if (this->power_button_binary_sensor_ != nullptr)
     this->power_button_binary_sensor_->publish_state((f3miso_byte & BUTTON_MASK_POWER) != 0);
@@ -446,5 +535,4 @@ void WhirlpoolSPI::publish_frame_group_() {
     this->dispensers_binary_sensor_->publish_state((f4miso_byte & BUTTON_MASK_DISPENSERS) != 0);
 }
 
-}  // namespace whirlpool_spi
-}  // namespace esphome
+}  // namespace esphome::whirlpool_spi

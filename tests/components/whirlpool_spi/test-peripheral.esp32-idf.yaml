@@ -1,0 +1,15 @@
+whirlpool_spi:
+  id: whirlpool_spi_peripheral
+  capture_mode: spi_peripheral
+  miso_pin: 18
+  mosi_pin: 19
+  cs_pin: 21
+  clk_pin: 22
+
+text_sensor:
+  - platform: whirlpool_spi
+    whirlpool_spi_id: whirlpool_spi_peripheral
+    frame0_miso:
+      name: Frame 0 MISO
+    frame0_mosi:
+      name: Frame 0 MOSI

@@ -1,0 +1,89 @@
+whirlpool_spi:
+  id: whirlpool_spi_bus
+  miso_pin: 18
+  mosi_pin: 19
+  cs_pin: 21
+  clk_pin: 22
+  selector_labels:
+    0: Normal
+    1: Casual
+
+sensor:
+  - platform: whirlpool_spi
+    whirlpool_spi_id: whirlpool_spi_bus
+    selector_position_index:
+      name: Selector Position Index
+    transfers_per_sec:
+      name: Transfers Rate
+    buffer_queue:
+      name: Buffer Queue
+    buffer_overflows:
+      name: Buffer Overflows
+    buffer_peak:
+      name: Buffer Peak
+    valid_frames:
+      name: Valid Frames
+    error_frames:
+      name: Error Frames
+    error_under:
+      name: Error Under
+    error_over:
+      name: Error Over
+    groups_completed:
+      name: Groups Completed
+    groups_dropped:
+      name: Groups Dropped
+    groups_failed_plausibility:
+      name: Groups Failed Plausibility
+
+text_sensor:
+  - platform: whirlpool_spi
+    whirlpool_spi_id: whirlpool_spi_bus
+    frame0_miso:
+      name: Frame 0 MISO
+    frame0_mosi:
+      name: Frame 0 MOSI
+    frame1_miso:
+      name: Frame 1 MISO
+    frame1_mosi:
+      name: Frame 1 MOSI
+    frame2_miso:
+      name: Frame 2 MISO
+    frame2_mosi:
+      name: Frame 2 MOSI
+    frame3_miso:
+      name: Frame 3 MISO
+    frame3_mosi:
+      name: Frame 3 MOSI
+    frame4_miso:
+      name: Frame 4 MISO
+    frame4_mosi:
+      name: Frame 4 MOSI
+    selector_position_name:
+      name: Selector Position
+
+binary_sensor:
+  - platform: whirlpool_spi
+    whirlpool_spi_id: whirlpool_spi_bus
+    power_button:
+      name: Power Button
+    delay_wash:
+      name: Delay Wash
+    start_pause:
+      name: Start Pause
+    cycle_signal:
+      name: Cycle Signal
+    ecoboost:
+      name: EcoBoost
+    extra_rinse:
+      name: Extra Rinse
+    deep_clean:
+      name: Deep Clean
+    soil_level:
+      name: Soil Level
+    spin_speed:
+      name: Spin Speed
+    wash_temp:
+      name: Wash Temp
+    dispensers:
+      name: Dispensers
